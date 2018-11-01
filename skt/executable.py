@@ -202,9 +202,11 @@ def cmd_merge(cfg):
         fetch_depth=cfg.get('fetch_depth')
     )
     bhead = ktree.checkout()
+    bsubject = ktree.get_commit_subject(bhead)
     commitdate = ktree.get_commit_date(bhead)
     save_state(cfg, {'baserepo': cfg.get('baserepo'),
                      'basehead': bhead,
+                     'basesubject': bsubject,
                      'commitdate': commitdate})
 
     remove_oldresult(cfg.get('output_dir'), 'merge.')
@@ -296,9 +298,11 @@ def cmd_merge(cfg):
 
     kpath = ktree.getpath()
     buildhead = ktree.get_commit_hash()
+    buildsubject = ktree.get_commit_subject()
 
     save_state(cfg, {'workdir': kpath,
-                     'buildhead': buildhead})
+                     'buildhead': buildhead,
+                     'buildsubject': buildsubject})
 
     report_results(merge_result_path, 'true',
                    merge_report_path, report_string)
@@ -358,7 +362,7 @@ def cmd_build(cfg):
         logging.info("tarball path: %s", ttgz)
         save_state(cfg, {'tarpkg': ttgz})
 
-    tconfig = '%s.csv.config' % cfg.get('buildhead')
+    tconfig = '%s.config' % cfg.get('buildhead')
     shutil.copyfile(builder.get_cfgpath(), tconfig)
 
     krelease = builder.getrelease()
@@ -809,6 +813,14 @@ def setup_parser():
         "--smtp-url",
         type=str,
         help='Use smtp url instead of localhost to send mail',
+    )
+    parser_report.add_argument(
+        "--template",
+        dest="template",
+        type=str,
+        default='full',
+        choices=('full', 'limited'),
+        help="Template to use for reports"
     )
     parser_report.set_defaults(func=cmd_report)
     parser_report.set_defaults(_name="report")

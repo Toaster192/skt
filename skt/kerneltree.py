@@ -150,60 +150,65 @@ class KernelTree(object):
             logging.debug("Adding missing remote 'origin': %s", self.uri)
             self.__git_cmd("remote", "add", "origin", self.uri)
 
+    def get_commit_details(self, ref=None, show_format="%H"):
+        """
+        Get details about a particular commit by specifying an output format.
+        Args:
+            ref: An optional reference to a commit in a git repo to be
+                 inspected. The current commit is used if a ref is not
+                 provided.
+            show_format: A `git show` format string to use to gather details.
+        Returns:
+            The stdout from `git show`.
+        """
+        args = ["show",
+                "--format={}".format(show_format),
+                "-s"]
+
+        # If a ref was specified, append it to the end of the git command.
+        if ref is not None:
+            args.append(ref)
+
+        stdout = self.__git_cmd(*args)
+
+        return stdout.rstrip()
+
     def get_commit_date(self, ref=None):
         """
-        Get the committer date of the commit pointed at by the specified
-        reference, or of the currently checked-out commit, if not specified.
-
+        Get the commit date of the commit specified by an optional ref.
         Args:
-            ref:    The reference to commit to get the committer date of,
-                    or None, if the currently checked-out commit should be
-                    used instead.
+            ref: An optional reference to a commit in a git repo to be
+                 inspected. The current commit is used if a ref is not
+                 provided.
         Returns:
             The epoch timestamp string of the commit's committer date.
         """
-        args = ["git",
-                "--work-tree", self.wdir,
-                "--git-dir", self.gdir,
-                "show",
-                "--format=%ct",
-                "-s"]
-
-        if ref is not None:
-            args.append(ref)
-
-        logging.debug("git_commit_date: %s", args)
-        grs = subprocess.Popen(args, stdout=subprocess.PIPE)
-        (stdout, _) = grs.communicate()
-
-        return int(stdout.rstrip())
+        result = self.get_commit_details(ref, show_format='%ct')
+        return int(result)
 
     def get_commit_hash(self, ref=None):
         """
-        Get the full hash of the commit pointed at by the specified reference,
-        or of the currently checked-out commit, if not specified.
-
+        Get the full hash of a commit specified by an optional ref.
         Args:
-            ref:    The reference to commit to get the hash of, or None, if
-                    the currently checked-out commit should be used instead.
+            ref: An optional reference to a commit in a git repo to be
+                 inspected. The current commit is used if a ref is not
+                 provided.
         Returns:
             The commit's full hash string.
         """
-        args = ["git",
-                "--work-tree", self.wdir,
-                "--git-dir", self.gdir,
-                "show",
-                "--format=%H",
-                "-s"]
+        return self.get_commit_details(ref, show_format='%H')
 
-        if ref is not None:
-            args.append(ref)
-
-        logging.debug("git_commit: %s", args)
-        grs = subprocess.Popen(args, stdout=subprocess.PIPE)
-        (stdout, _) = grs.communicate()
-
-        return stdout.rstrip()
+    def get_commit_subject(self, ref=None):
+        """
+        Get the subject line of a commit specified by an optional ref.
+        Args:
+            ref: An optional reference to a commit in a git repo to be
+                 inspected. The current commit is used if a ref is not
+                 provided.
+        Returns:
+            The commit's subject line.
+        """
+        return self.get_commit_details(ref, show_format='%s')
 
     def checkout(self):
         """

@@ -138,8 +138,11 @@ class Reporter(object):
         self.multi_job_ids = []
 
     def __stateconfigdata(self, mergedata):
-        mergedata['base'] = (self.cfg.get("baserepo"),
-                             self.cfg.get("basehead"))
+        # Store the repo URL, base commit SHA, and subject for that commit.
+        mergedata['baserepo'] = self.cfg.get("baserepo")
+        mergedata['basehead'] = self.cfg.get("basehead")
+        mergedata['basesubject'] = self.cfg.get('basesubject')
+
         if self.cfg.get("mergerepos"):
             mrl = self.cfg.get("mergerepos")
             mhl = self.cfg.get("mergeheads")
@@ -334,7 +337,15 @@ class Reporter(object):
         Returns: A long string of test results suitable for sending via email
                  or displaying directly in a terminal.
         """
-        template = JINJA_ENV.get_template('report.j2')
+        template_name = self.cfg['template']
+
+        # Ensure the template name is valid.
+        assert re.match(r'^[A-Za-z0-9_-]+$', template_name), \
+            "Invalid template name"
+
+        # Set the template filename and load the template.
+        template_file = "report_{}.j2".format(template_name)
+        template = JINJA_ENV.get_template(template_file)
 
         # If we don't have any state files, this is likely a run with a single
         # test. Make a single entry in self.statefiles so we can re-use the
@@ -391,9 +402,9 @@ class Reporter(object):
                 report_jobs.append(job_data)
                 continue
 
-            # Did the tests fail for this job?
+            # Did the tests run and fail for this job?
             # If yes, get the job results for the report.
-            if self.cfg.get('retcode') != '0':
+            if self.cfg.get('runner') and self.cfg.get('retcode') != '0':
                 self.multireport_failed = MultiReportFailure.TEST
                 job_data['test_results'] = self.__getjobresults()
                 report_jobs.append(job_data)

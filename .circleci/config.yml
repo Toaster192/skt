@@ -17,7 +17,7 @@ defaults: &defaults
           skt -vv --state -d workdir --rc sktrc merge \
             --pw https://patchwork.ozlabs.org/patch/895383/ \
             -b git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
-            --ref v4.16 \
+            --ref v4.19 \
             --fetch-depth 1
         working_directory: /tmp/skt_test
     - run:
@@ -25,6 +25,12 @@ defaults: &defaults
         command: |
             skt -vv --state -d workdir --rc sktrc build -c config \
                 --cfgtype tinyconfig
+        working_directory: /tmp/skt_test
+    - run:
+        name: Test `skt report`
+        command: |
+            skt -vv --state -d workdir --rc sktrc report \
+                --reporter stdio
         working_directory: /tmp/skt_test
     - store_artifacts:
         path: /tmp/skt_test/workdir/*.log
