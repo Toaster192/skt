@@ -219,6 +219,7 @@ class Reporter(object):
     def __get_failed_task_log(self, task_node):
         """
         Get logs from a failed task and its subtasks.
+
         Returns: A list of log file URLs.
         """
         useless_logs = ['harness.log', 'setup.log']
@@ -255,13 +256,10 @@ class Reporter(object):
         Every test run has a list of receipe sets that were run. Each set
         can contain one or more recipes. Each recipe has one or more tasks
         that run individual tests.
+
         Returns:
             A list of lines representing results of test runs.
         """
-        # Did the job fail?
-        if self.cfg.get('retcode') == '0':
-            return
-
         result = []
 
         runner = skt.runner.getrunner(*self.cfg.get("runner"))
@@ -276,6 +274,9 @@ class Reporter(object):
         # Loop through each recipe set to examine each recipe (and its tasks).
         for recipe_set_result in recipe_set_results:
             for recipe in recipe_set_result.findall('recipe'):
+
+                # Set up a list of all the tasks that passed in this job.
+                passed_tasks = []
 
                 # This will hold a list of XML nodes for each task that failed
                 # so we can retrieve data about the task later.
@@ -298,20 +299,31 @@ class Reporter(object):
                 task_node = self.__get_task(recipe, test_name)
                 if task_node.attrib['result'] != 'Pass':
                     failed_tasks.append(task_node)
-                    continue
+                else:
+                    # Add 'boot test' to the kpkginstall task to show that it
+                    # includes booting the kernel, not just installing it.
+                    passed_tasks.append("{} (boot test)".format(test_name))
 
-                # Get a list of the tests that were run for this recipe.
-                tests_run = runner.get_recipe_test_list(recipe)
-                for test_name in tests_run:
+                    # Get a list of the tests that were run for this recipe.
+                    tests_run = runner.get_recipe_test_list(recipe)
+                    for test_name in tests_run:
 
-                    # Get the XML node of the task and its result.
-                    task_node = self.__get_task(recipe, test_name)
-                    task_result = task_node.attrib['result']
+                        # Get the XML node of the task and its result.
+                        task_node = self.__get_task(recipe, test_name)
+                        task_result = task_node.attrib['result']
+                        task_status = task_node.attrib['status']
 
-                    # If this task failed, add it to the list of the failed
-                    # tasks.
-                    if task_result != 'Pass':
-                        failed_tasks.append(task_node)
+                        if task_result == 'Pass':
+                            test_name = task_node.attrib.get('name')
+                            passed_tasks.append(test_name)
+                        elif (task_result == 'Warn'
+                              and task_status == 'Aborted'):
+                            # Don't add tasks that aborted to the lists
+                            continue
+                        else:
+                            # If this task failed, add it to the list of the
+                            # failed tasks
+                            failed_tasks.append(task_node)
 
                 # Now that we have a list of tasks that failed, go through
                 # the list and gather data for each task. This data will go
@@ -323,7 +335,19 @@ class Reporter(object):
                         'name': task_node.attrib.get('name'),
                         'logs': logs
                     }
+                    # Add 'boot test' to the kpkginstall task if it failed to
+                    # show that it includes booting the kernel, not just
+                    # installing it. We can't do it earlier because we need the
+                    # original task to work with.
+                    kpkginstall_name = '/distribution/kpkginstall'
+                    if failed_task_detail['name'] == kpkginstall_name:
+                        failed_task_detail['name'] = '{} (boot test)'.format(
+                            kpkginstall_name
+                        )
                     recipe_data['failed_tasks'].append(failed_task_detail)
+
+                # Add the passed tasks to the recipe_data dictionary.
+                recipe_data['passed_tasks'] = passed_tasks
 
                 # Add all the details about this recipe to the main result.
                 result.append(recipe_data)
@@ -402,17 +426,15 @@ class Reporter(object):
                 report_jobs.append(job_data)
                 continue
 
-            # Did the tests run and fail for this job?
-            # If yes, get the job results for the report.
-            if self.cfg.get('runner') and self.cfg.get('retcode') != '0':
-                self.multireport_failed = MultiReportFailure.TEST
+            # Did the tests run for this job?
+            if self.cfg.get('runner'):
+                # If the tests failed, mark the result as a test failure.
+                if self.cfg.get('retcode') != '0':
+                    self.multireport_failed = MultiReportFailure.TEST
+
+                # Collect the tests results and append them to our list.
                 job_data['test_results'] = self.__getjobresults()
                 report_jobs.append(job_data)
-                continue
-
-            # If we made it this far, the job was successful. Add it to the
-            # report.
-            report_jobs.append(job_data)
 
         # Render the report.
         result = template.render(
@@ -498,6 +520,9 @@ class MailReporter(Reporter):
         # Get all of the required fields to send an email
         self.mailfrom = cfg['reporter']['mail_from']
         self.mailto = [to.strip() for to in cfg['reporter']['mail_to']]
+        self.mailcc = [cc.strip() for cc in cfg['reporter']['mail_cc'] or []]
+        self.mailbcc = [bcc.strip()
+                        for bcc in cfg['reporter']['mail_bcc'] or []]
         self.headers = [headers.strip() for headers in
                         cfg['reporter']['mail_header']]
         self.subject = cfg['reporter']['mail_subject']
@@ -513,6 +538,7 @@ class MailReporter(Reporter):
         if self.subject:
             msg['Subject'] = self.subject
         msg['To'] = ', '.join(self.mailto)
+        msg['Cc'] = ', '.join(self.mailcc)
         msg['From'] = self.mailfrom
 
         # Add any extra headers
@@ -542,5 +568,7 @@ class MailReporter(Reporter):
             msg.attach(tmp)
 
         mailserver = smtplib.SMTP(self.smtp_url)
-        mailserver.sendmail(self.mailfrom, self.mailto, msg.as_string())
+        mailserver.sendmail(self.mailfrom,
+                            self.mailto + self.mailcc + self.mailbcc,
+                            msg.as_string())
         mailserver.quit()

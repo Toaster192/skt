@@ -363,17 +363,23 @@ def cmd_build(cfg):
         save_state(cfg, {'tarpkg': ttgz})
 
     tconfig = '%s.config' % cfg.get('buildhead')
-    shutil.copyfile(builder.get_cfgpath(), tconfig)
+    try:
+        shutil.copyfile(builder.get_cfgpath(), tconfig)
+        krelease = builder.getrelease()
+        save_state(cfg, {'buildconf': tconfig,
+                         'krelease': krelease})
+    except IOError:  # Kernel config failed to build
+        tconfig = ''
+        logging.error('No config file to copy found!')
 
-    krelease = builder.getrelease()
     kernel_arch = builder.build_arch
+    cross_compiler_prefix = builder.cross_compiler_prefix
     make_opts = ' '.join(builder.make_argv_base
                          + builder.targz_pkg_argv
                          + builder.extra_make_args)
 
-    save_state(cfg, {'buildconf': tconfig,
-                     'krelease': krelease,
-                     'kernel_arch': kernel_arch,
+    save_state(cfg, {'kernel_arch': kernel_arch,
+                     'cross_compiler_prefix': cross_compiler_prefix,
                      'make_opts': make_opts})
 
     report_string = '{} ({{{}}})\n{}\n    {}'.format(
@@ -784,6 +790,18 @@ def setup_parser():
         help="Report recipient's email address"
     )
     parser_report.add_argument(
+        "--mail-cc",
+        action='append',
+        type=str,
+        help="Report copy recipient's email address"
+    )
+    parser_report.add_argument(
+        "--mail-bcc",
+        action='append',
+        type=str,
+        help="Report hidden copy recipient's email address"
+    )
+    parser_report.add_argument(
         "--mail-from",
         type=str,
         help="Report sender's email address"
@@ -970,6 +988,8 @@ def load_config(args):
         cfg['reporter'] = {
             'type': cfg.get('type'),
             'mail_to': cfg.get('mail_to'),
+            'mail_cc': cfg.get('mail_cc'),
+            'mail_bcc': cfg.get('mail_bcc'),
             'mail_from': cfg.get('mail_from'),
             'mail_subject': cfg.get('mail_subject'),
             'mail_header': cfg.get('mail_header')
