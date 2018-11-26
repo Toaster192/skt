@@ -311,14 +311,19 @@ class BeakerRunner(Runner):
 
                     # Something in the recipe set really reported failure
                     test_failure = False
-                    for task in recipe.findall('task'):
-                        if 'kpkginstall' in task.attrib.get('name', ''):
-                            if task.attrib.get('result') in ['Pass', 'Panic']:
-                                test_failure = True
-                            else:
+
+                    if not self.get_kpkginstall_task(recipe):
+                        # Assume the kernel was installed by default and
+                        # everything is a test
+                        test_failure = True
+                    else:
+                        test_list = self.get_recipe_test_list(recipe)
+
+                        for task in recipe.findall('task'):
+                            if task.attrib.get('result') != 'Pass':
+                                if task.attrib.get('name') in test_list:
+                                    test_failure = True
                                 break
-                        elif task.attrib.get('result') != 'Pass':
-                            break
 
                     if not test_failure:
                         # Recipe failed before the tested kernel was installed
@@ -354,8 +359,10 @@ class BeakerRunner(Runner):
     def get_recipe_test_list(self, recipe_node):
         """
         Retrieve the list of tests which ran for a particular recipe. All tasks
-        after kpkginstall, which were not skipped, are interpreted as ran
-        tests.
+        after kpkginstall (including the kpkginstall task itself), which were
+        not skipped, are interpreted as ran tests. If the kpkginstall task
+        doesn't exist, assume every task is a test and the kernel was installed
+        by default.
 
         Args:
             recipe_node: ElementTree node representing the recipe, extracted
@@ -365,16 +372,37 @@ class BeakerRunner(Runner):
             List of test names that ran.
         """
         test_list = []
-        after_kpkg = False
+        if self.get_kpkginstall_task(recipe_node) is None:
+            after_kpkg = True
+        else:
+            after_kpkg = False
 
         for test_task in recipe_node.findall('task'):
+            fetch = test_task.find('fetch')
+            if fetch is not None and \
+                    'kpkginstall' in fetch.attrib.get('url', ''):
+                after_kpkg = True
+
             if after_kpkg and test_task.attrib.get('result') != 'Skip':
                 test_list.append(test_task.attrib.get('name'))
 
-            if 'kpkginstall' in test_task.attrib.get('name', ''):
-                after_kpkg = True
-
         return test_list
+
+    def get_kpkginstall_task(self, recipe_node):
+        """
+        Return a kpkginstall task node for a given recipe.
+
+        Returns:
+            Etree node representing kpkginstall task, None if there is no such
+            task.
+        """
+        for task in recipe_node.findall('task'):
+            fetch = task.find('fetch')
+            if fetch is not None and \
+                    'kpkginstall' in fetch.attrib.get('url', ''):
+                return task
+
+        return None
 
     def __jobsubmit(self, xml):
         jobid = None
@@ -477,12 +505,10 @@ class BeakerRunner(Runner):
                     recipe_result.upper()
                 )
 
-                kpkginstall_task = recipe.find(
-                    "task[@name='/distribution/kpkginstall']"
-                )
+                kpkginstall_task = self.get_kpkginstall_task(recipe)
                 if kpkginstall_task.attrib.get('result') != 'Pass':
                     report_string += 'Kernel failed to boot!\n\n'
-                    failed_tasks.append('/distribution/kpkginstall')
+                    failed_tasks.append(kpkginstall_task.attrib.get('name'))
                 else:
                     recipe_tests = self.get_recipe_test_list(recipe)
                     if recipe_tests:
