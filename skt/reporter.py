@@ -275,11 +275,7 @@ class Reporter(object):
         for recipe_set_result in recipe_set_results:
             for recipe in recipe_set_result.findall('recipe'):
 
-                # Set up a list of all the tasks that passed in this job.
                 passed_tasks = []
-
-                # This will hold a list of XML nodes for each task that failed
-                # so we can retrieve data about the task later.
                 failed_tasks = []
 
                 # Get basic information about this recipe.
@@ -289,65 +285,48 @@ class Reporter(object):
                     'arch': recipe.find(
                         'hostRequires/and/arch').attrib.get('value'),
                     'result': recipe_result,
-                    'failed_tasks': [],
                 }
 
-                # Check if the kernel booted properly. If it failed, add it
-                # to the list of failed tasks and don't bother checking any
-                # other tests.
-                test_name = '/distribution/kpkginstall'
-                task_node = self.__get_task(recipe, test_name)
-                if task_node.attrib['result'] != 'Pass':
-                    failed_tasks.append(task_node)
-                else:
-                    # Add 'boot test' to the kpkginstall task to show that it
-                    # includes booting the kernel, not just installing it.
-                    passed_tasks.append("{} (boot test)".format(test_name))
+                # Get a list of the tests that were run for this recipe.
+                tests_run = runner.get_recipe_test_list(recipe)
+                for test_name in tests_run:
 
-                    # Get a list of the tests that were run for this recipe.
-                    tests_run = runner.get_recipe_test_list(recipe)
-                    for test_name in tests_run:
+                    # Get the XML node of the task and basic data
+                    task_node = self.__get_task(recipe, test_name)
+                    task_name = task_node.attrib.get('name')
+                    task_result = task_node.attrib['result']
+                    task_status = task_node.attrib['status']
+                    task_url = ''
 
-                        # Get the XML node of the task and its result.
-                        task_node = self.__get_task(recipe, test_name)
-                        task_result = task_node.attrib['result']
-                        task_status = task_node.attrib['status']
+                    # Find git source, if any
+                    fetch = task_node.find('fetch')
+                    if fetch is not None:
+                        task_url = fetch.attrib.get('url')
 
-                        if task_result == 'Pass':
-                            test_name = task_node.attrib.get('name')
-                            passed_tasks.append(test_name)
-                        elif (task_result == 'Warn'
-                              and task_status == 'Aborted'):
-                            # Don't add tasks that aborted to the lists
-                            continue
-                        else:
-                            # If this task failed, add it to the list of the
-                            # failed tasks
-                            failed_tasks.append(task_node)
+                    if task_result == 'Pass':
+                        passed_tasks.append({'name': task_name,
+                                             'url': task_url})
+                    elif (task_result == 'Warn' and task_status == 'Aborted'):
+                        # Don't add tasks that aborted to the lists
+                        continue
+                    else:
+                        # Retrieve all needed data about the failed task
+                        logs = self.__get_failed_task_log(task_node)
+                        # If the task caused a kernel panic, add a link to the
+                        # console log since that's the one containing the
+                        # actual trace.
+                        if task_result == 'Panic':
+                            console = recipe.find(
+                                "logs/log[@name='console.log']")
+                            if console is not None:
+                                logs.append(console.attrib.get('href'))
 
-                # Now that we have a list of tasks that failed, go through
-                # the list and gather data for each task. This data will go
-                # into the report.
-                for task_node in failed_tasks:
-                    logs = self.__get_failed_task_log(task_node)
+                        failed_tasks.append({'name': task_name,
+                                             'logs': logs,
+                                             'url': task_url})
 
-                    failed_task_detail = {
-                        'name': task_node.attrib.get('name'),
-                        'logs': logs
-                    }
-                    # Add 'boot test' to the kpkginstall task if it failed to
-                    # show that it includes booting the kernel, not just
-                    # installing it. We can't do it earlier because we need the
-                    # original task to work with.
-                    kpkginstall_name = '/distribution/kpkginstall'
-                    if failed_task_detail['name'] == kpkginstall_name:
-                        failed_task_detail['name'] = '{} (boot test)'.format(
-                            kpkginstall_name
-                        )
-                    recipe_data['failed_tasks'].append(failed_task_detail)
-
-                # Add the passed tasks to the recipe_data dictionary.
                 recipe_data['passed_tasks'] = passed_tasks
+                recipe_data['failed_tasks'] = failed_tasks
 
                 # Add all the details about this recipe to the main result.
                 result.append(recipe_data)
