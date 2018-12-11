@@ -13,9 +13,13 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 """Test cases for runner module."""
 import os
+import re
+import subprocess
+import tempfile
 import unittest
 
 from defusedxml.ElementTree import fromstring
+from defusedxml.ElementTree import tostring
 import mock
 
 from skt import runner
@@ -41,10 +45,136 @@ class TestRunner(unittest.TestCase):
 
         self.max_aborted = 3
 
+    def test_get_kpkginstall_task(self):
+        """ Ensure get_kpkginstall_task works."""
+        recipe_xml = """<recipe><task name="Boot test">
+        <fetch url="kpkginstall"/></task>
+        <task><fetch url="kpkginstall"/></task></recipe>"""
+        recipe_node = fromstring(recipe_xml)
+
+        ret_node = self.myrunner.get_kpkginstall_task(recipe_node)
+        self.assertEqual(ret_node.attrib['name'], 'Boot test')
+        self.assertEqual(ret_node.find('fetch').attrib['url'], 'kpkginstall')
+
+    def test_get_recipe_test_list_1st(self):
+        """ Ensure get_recipe_test_list works. First task is skipped."""
+        recipe_xml = """<recipe><task result="Skip" /><task name="good2" />
+        </recipe>"""
+
+        recipe_node = fromstring(recipe_xml)
+
+        ret_list = self.myrunner.get_recipe_test_list(recipe_node)
+        self.assertEqual(ret_list, ['good2'])
+
+    def test_get_recipe_test_list_2nd(self):
+        """ Ensure get_recipe_test_list works. Second task is skipped."""
+        recipe_xml = """<recipe><task name="good1" /><task result="Skip" />
+        </recipe>"""
+
+        recipe_node = fromstring(recipe_xml)
+
+        ret_list = self.myrunner.get_recipe_test_list(recipe_node)
+        self.assertEqual(ret_list, ['good1'])
+
+    def test_get_recipe_test_list(self):
+        """ Ensure get_recipe_test_list works. No task skipped."""
+        recipe_xml = """<recipe><task name="good1" /><task name="good2" />
+           </recipe>"""
+
+        recipe_node = fromstring(recipe_xml)
+
+        ret_list = self.myrunner.get_recipe_test_list(recipe_node)
+        self.assertEqual(ret_list, ['good1', 'good2'])
+
+    @mock.patch('subprocess.Popen')
+    def test_jobsubmit(self, mock_popen):
+        """ Ensure __jobsubmit works."""
+        self.myrunner.jobowner = 'beaker-gods'
+
+        args = ["bkr", "job-submit", "--job-owner=beaker-gods", "-"]
+
+        mock_popen.return_value.returncode = 0
+        mock_popen.return_value.communicate.return_value = \
+            ("Submitted: ['123']", '')
+
+        # pylint: disable=W0212,E1101
+        self.myrunner._BeakerRunner__jobsubmit('<xml />')
+
+        mock_popen.assert_called_once_with(args, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE)
+
+    @mock.patch('subprocess.Popen')
+    def test_cancel_pending_jobs(self, mock_popen):
+        """ Ensure cancel_pending_jobs works."""
+        self.myrunner.watchlist = {'1', '2', '3'}
+
+        binary = 'bkr'
+        args = ['job-cancel'] + [s for s in self.myrunner.watchlist]
+
+        attrs = {'communicate.return_value': ('output', 'error'),
+                 'returncode': 0}
+        mock_popen.configure_mock(**attrs)
+
+        self.myrunner.cancel_pending_jobs()
+
+        mock_popen.assert_called_once_with([binary] + args)
+
     def test_getrunner(self):
         """Ensure getrunner() can create a runner subclass."""
         result = runner.getrunner('beaker', {'jobtemplate': 'test'})
         self.assertIsInstance(result, runner.BeakerRunner)
+
+    def test_load_blacklist(self):
+        """Ensure BeakerRunner.__load_blacklist() works"""
+        # pylint: disable=W0212,E1101
+        hostnames = ['host1', 'host2']
+        with tempfile.NamedTemporaryFile() as temp:
+            temp.write('\n'.join(hostnames) + '\n')
+            temp.seek(0)
+
+            myrunner = self.myrunner
+
+            myrunner.blacklisted = self.myrunner._BeakerRunner__load_blacklist(
+                temp.name)
+
+        self.assertEqual(hostnames, self.myrunner.blacklisted)
+
+    def test_blacklist_hreq_nohostnames(self):
+        """ Ensure blacklist_hreq works without hostnames."""
+        # pylint: disable=W0212,E1101
+        initial = """<hostRequires><system_type value="Machine"/><and>
+        <hypervisor op="=" value=""/></and></hostRequires>"""
+
+        exp_result = """<hostRequires><system_type value="Machine"/><and>
+        <hypervisor op="=" value=""/></and></hostRequires>"""
+
+        hreq_node = fromstring(initial)
+
+        self.myrunner.blacklisted = []
+        etree_result = self.myrunner._BeakerRunner__blacklist_hreq(hreq_node)
+        result = tostring(etree_result)
+        self.assertEqual(re.sub(r'[\s]+', '', exp_result),
+                         re.sub(r'[\s]+', '', result))
+
+    def test_blacklist_hreq_whnames(self):
+        """ Ensure blacklist_hreq works with hostnames."""
+        # pylint: disable=W0212,E1101
+        initial = """<hostRequires><system_type value="Machine"/><and>
+        <hypervisor op="=" value=""/></and></hostRequires>"""
+
+        exp_result = """<hostRequires><system_type value="Machine"/><and>
+        <hypervisor op="=" value=""/><hostname op="!=" value="host1"/>
+        <hostname op="!=" value="host2"/></and></hostRequires>"""
+
+        hreq_node = fromstring(initial)
+
+        # load blacklist ['host1', 'host2']
+        self.test_load_blacklist()
+
+        etree_result = self.myrunner._BeakerRunner__blacklist_hreq(hreq_node)
+        result = tostring(etree_result)
+        self.assertEqual(re.sub(r'[\s]+', '', exp_result),
+                         re.sub(r'[\s]+', '', result))
 
     def test_invalid_getrunner(self):
         """Ensure getrunner() throws an exception for an invalid runner."""
@@ -88,6 +218,36 @@ class TestRunner(unittest.TestCase):
         result = self.myrunner._BeakerRunner__getxml({'ARCH': 's390x'})
         expected_xml = self.test_xml.replace("##ARCH##", "s390x")
         self.assertEqual(result, expected_xml)
+
+    @mock.patch('subprocess.Popen')
+    def test_add_to_watchlist(self, mock_popen):
+        """Ensure __add_to_watchlist() works."""
+        # pylint: disable=W0212,E1101
+        j_jobid = 'J:123'
+        setid = '456'
+        s_setid = 'RS:{}'.format(setid)
+        test_xml = """<xml><whiteboard>yeah-that-whiteboard</whiteboard>
+        <recipeSet id="{}" /></xml>""".format(setid)
+
+        mock_popen.return_value.returncode = 0
+        mock_popen.return_value.communicate.return_value = (test_xml, '')
+
+        self.myrunner._BeakerRunner__add_to_watchlist(j_jobid)
+        mock_popen.assert_called_once_with(["bkr", "job-results", j_jobid],
+                                           stdout=subprocess.PIPE)
+
+        # test that whiteboard was parsed OK
+        self.assertEqual(self.myrunner.whiteboard, 'yeah-that-whiteboard')
+
+        # test that job_to_recipe mapping was updated
+        self.assertEqual(self.myrunner.job_to_recipe_set_map[j_jobid],
+                         {s_setid})
+
+        # test that watchlist contains RS
+        self.assertIn(s_setid, self.myrunner.watchlist)
+
+        # test that no recipes completed
+        self.assertEqual(self.myrunner.completed_recipes[s_setid], set())
 
     @mock.patch('subprocess.Popen')
     def test_getresultstree(self, mock_popen):
