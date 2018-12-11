@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as etree
 
@@ -72,6 +73,9 @@ class BeakerRunner(Runner):
         self.aborted_count = 0
         # Set up the default, allowing for overrides with each run
         self.max_aborted = 3
+
+        # determines if termination cleanup was done and all jobs terminated
+        self.cleanup_done = False
 
         logging.info("runner type: %s", self.TYPE)
         logging.info("beaker template: %s", self.template)
@@ -244,6 +248,21 @@ class BeakerRunner(Runner):
 
         return newroot
 
+    def cleanup_handler(self):
+        # don't run cleanup handler twice by accident
+        if self.cleanup_done:
+            return
+
+        # skt is being terminated, cancel its jobs
+        self.cancel_pending_jobs()
+
+        self.cleanup_done = True
+
+    def signal_handler(self, signal, frame):
+        self.cleanup_handler()
+
+        sys.exit(1)
+
     def cancel_pending_jobs(self):
         """
         Cancel all recipe sets from self.watchlist and remove their IDs from
@@ -255,7 +274,7 @@ class BeakerRunner(Runner):
             if ret:
                 logging.info('Failed to cancel the remaining recipe sets!')
 
-        for job_id in self.job_to_recipe_set_map:
+        for job_id in set(self.job_to_recipe_set_map):
             self.__forget_taskspec(job_id)
 
     def __watchloop(self):
@@ -312,7 +331,7 @@ class BeakerRunner(Runner):
                     # Something in the recipe set really reported failure
                     test_failure = False
 
-                    if not self.get_kpkginstall_task(recipe):
+                    if self.get_kpkginstall_task(recipe) is None:
                         # Assume the kernel was installed by default and
                         # everything is a test
                         test_failure = True
