@@ -1,4 +1,4 @@
-defaults: &defaults
+tarball_steps: &tarball_steps
   working_directory: /tmp/skt
   steps:
     - checkout
@@ -41,20 +41,77 @@ defaults: &defaults
     - store_artifacts:
         path: /tmp/skt_test/sktrc
 
+rpm_steps: &rpm_steps
+  working_directory: /tmp/skt
+  steps:
+    - checkout
+    - run:
+        name: Install skt using pip
+        command: pip install .
+    - run:
+        name: Prepare git
+        command: |
+          mkdir -p /tmp/skt_test/workdir
+          git config --global user.name "SKT"
+          git config --global user.email "noreply@redhat.com"
+    - run:
+        name: Test `skt merge`
+        command: |
+          skt -vv --state -d workdir --rc sktrc merge \
+            --pw https://patchwork.ozlabs.org/patch/895383/ \
+            -b git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
+            --ref v4.19 \
+            --fetch-depth 1
+        working_directory: /tmp/skt_test
+    - run:
+        name: Test `skt build`
+        command: |
+            make -C workdir tinyconfig
+            skt -vv --state -d workdir --rc sktrc build --packaging binrpm-pkg
+        working_directory: /tmp/skt_test
+    - run:
+        name: Test `skt publish`
+        command: |
+            mkdir -vp /tmp/published
+            skt -vv --state -d workdir --rc sktrc publish \
+              --publisher cp /tmp/published http://localhost/published \
+    - run:
+        name: Test `skt report`
+        command: |
+            skt -vv --state -d workdir --rc sktrc report \
+                --reporter stdio
+        working_directory: /tmp/skt_test
+    - store_artifacts:
+        path: /tmp/skt_test/workdir/*.log
+    - store_artifacts:
+        path: /tmp/skt_test/workdir/.config
+    - store_artifacts:
+        path: /tmp/skt_test/sktrc
+
 version: 2
 jobs:
-  fedora28:
+  fedora29:
     docker:
-      - image: quay.io/major/fedora28-kernel-builder:latest
-    <<: *defaults
+      - image: quay.io/major/fedora29-kernel-builder:latest
+    <<: *tarball_steps
   centos7:
     docker:
       - image: quay.io/major/centos-kernel-builder:latest
-    <<: *defaults
+    <<: *tarball_steps
+  fedora29_rpm:
+    docker:
+      - image: quay.io/major/fedora29-kernel-builder:latest
+    <<: *rpm_steps
+  centos7_rpm:
+    docker:
+      - image: quay.io/major/centos-kernel-builder:latest
+    <<: *rpm_steps
 
 workflows:
   version: 2
   build_and_test:
     jobs:
-      - fedora28
+      - fedora29
       - centos7
+      - fedora29_rpm
+      - centos7_rpm

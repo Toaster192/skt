@@ -37,24 +37,22 @@ class KernelBuilder(object):
     # pylint: disable=too-many-instance-attributes,too-many-arguments
     def __init__(self, source_dir, basecfg, cfgtype=None,
                  extra_make_args=None, enable_debuginfo=False,
-                 rh_configs_glob=None, localversion=None):
+                 rh_configs_glob=None, localversion=None, packaging=None):
         self.source_dir = source_dir
         self.basecfg = basecfg
         self.cfgtype = cfgtype if cfgtype is not None else "olddefconfig"
         self._ready = 0
         self.buildlog = join_with_slash(self.source_dir, "build.log")
-        self.make_argv_base = ["make", "-C", self.source_dir]
+        self.make_argv_base = [
+            "make", "-C", self.source_dir,
+            "-j%d" % multiprocessing.cpu_count(),
+        ]
         self.enable_debuginfo = enable_debuginfo
         self.build_arch = self.__get_build_arch()
         self.cross_compiler_prefix = self.__get_cross_compiler_prefix()
         self.rh_configs_glob = rh_configs_glob
         self.localversion = localversion
-
-        self.targz_pkg_argv = [
-            "INSTALL_MOD_STRIP=1",
-            "-j%d" % multiprocessing.cpu_count(),
-            "targz-pkg"
-        ]
+        self.packaging = packaging
 
         # Split the extra make arguments provided by the user
         if extra_make_args:
@@ -163,7 +161,7 @@ class KernelBuilder(object):
 
     def __get_build_arch(self):
         """Determine the build architecture for the kernel build."""
-        # pylint: disable=no-self-use
+        # pylint: disable=no-self-use,
         # Detect cross-compiling via the ARCH= environment variable
         if 'ARCH' in os.environ:
             return os.environ['ARCH']
@@ -217,88 +215,113 @@ class KernelBuilder(object):
 
         return krelease
 
-    def mktgz(self, timeout=60 * 60 * 12):
+    def build(self):
         """
-        Build kernel and modules, after that, pack everything into a tarball.
+        Build the kernel with an appropriate package type.
 
-        Args:
-            timeout:    Max time in seconds will wait for build.
         Returns:
-            The full path of the tarball generated.
-        Raises:
-            CommandTimeoutError: When building kernel takes longer than the
-                                 specified timeout.
-            CalledProcessError:  When a command returns an exit code different
-                                 than zero.
-            ParsingError:        When can not find the tarball path in stdout.
-            IOError:             When tarball file doesn't exist.
+            For tarballs: path to the tarball
+            For RPMs: path to the yum repository
         """
         fpath = None
         stdout_list = []
 
-        # Set up the arguments and options for the kernel build
+        # Two general kernel packaging formats are supported by skt: tar + rpm.
+        if 'tar' in self.packaging:
+            # Stripping modules makes kernel builds much smaller in size.
+            packaging_args = ["INSTALL_MOD_STRIP=1", self.packaging]
+        elif 'rpm' in self.packaging:
+            packaging_args = [self.packaging]
+        else:
+            msg = "skt only supports tar and rpm packaging types."
+            sys.exit(msg)
+
+        # Set up the arguments to build the kernel.
         kernel_build_argv = (
             self.make_argv_base
-            + self.targz_pkg_argv
+            + packaging_args
             + self.extra_make_args
         )
-
         logging.info("building kernel: %s", kernel_build_argv)
 
+        # Display stdout/stderr to the console and to a log file.
         with io.open(self.buildlog, 'wb') as writer, \
                 io.open(self.buildlog, 'rb') as reader:
-            self.__prepare_kernel_config(stdout=writer,
-                                         stderr=subprocess.STDOUT)
+
+            # For tar-based packages, config files must be copied or generated
+            # first. RPMs generate their own configuration files during the
+            # build process.
+            if 'tar' in self.packaging:
+                self.__prepare_kernel_config(
+                    stdout=writer,
+                    stderr=subprocess.STDOUT
+                )
+            else:
+                self._ready = 1
+
+            # Start the kernel build.
             make = subprocess.Popen(kernel_build_argv,
                                     stdout=writer,
                                     stderr=subprocess.STDOUT)
-            make_timedout = []
 
-            def stop_process(proc):
-                """
-                Terminate the process with SIGTERM and flag it as timed out.
-                """
-                if proc.poll() is None:
-                    proc.terminate()
-                    make_timedout.append(True)
-            timer = Timer(timeout, stop_process, [make])
-            timer.setDaemon(True)
-            timer.start()
-            try:
-                while make.poll() is None:
-                    self.append_and_log2stdout(reader.readlines(), stdout_list)
-                    time.sleep(1)
+            # Poll for output and handle stdout/stderr properly.
+            while make.poll() is None:
                 self.append_and_log2stdout(reader.readlines(), stdout_list)
-            finally:
-                timer.cancel()
-            if make_timedout:
-                raise CommandTimeoutError(
-                    "'{}' was taking too long".format(
-                        ' '.join(kernel_build_argv)
-                    )
-                )
+                time.sleep(1)
+
+            # Ensure we get the last line of the output.
+            self.append_and_log2stdout(reader.readlines(), stdout_list)
+
+            # Raise an exception for build failures.
             if make.returncode != 0:
                 raise subprocess.CalledProcessError(
                     make.returncode,
                     ' '.join(kernel_build_argv)
                 )
 
-        match = re.search("^Tarball successfully created in (.*)$",
-                          ''.join(stdout_list), re.MULTILINE)
-        if match:
-            fpath = os.path.realpath(
-                join_with_slash(
-                    self.source_dir,
-                    match.group(1)
-                )
+            # Did we find any tarballs in the output?
+            match = re.search(
+                "^Tarball successfully created in (.*)$",
+                ''.join(stdout_list), re.MULTILINE
             )
-        else:
-            raise ParsingError('Failed to find tgz path in stdout')
+            if match:
+                fpath = os.path.realpath(
+                    join_with_slash(
+                        self.source_dir,
+                        match.group(1)
+                    )
+                )
 
-        if not os.path.isfile(fpath):
-            raise IOError("Built kernel tarball {} not found".format(fpath))
+            # Is the tarball present on the filesystem?
+            if not os.path.isfile(fpath):
+                raise IOError(
+                    "Built kernel tarball {} not found".format(fpath)
+                )
 
-        return fpath
+            # Did we find any RPMs in the output?
+            rpm_files = re.findall(
+                "^Wrote: (.*)$",
+                '\n'.join(stdout_list), re.MULTILINE
+            )
+
+            if rpm_files:
+                # If we found RPMs, create a repo directory.
+                fpath = os.path.realpath(
+                    join_with_slash(
+                        self.source_dir,
+                        'repo'
+                    )
+                )
+                os.makedirs(fpath)
+
+                # Move the kernel RPMs into the repo directory.
+                for rpm_file in rpm_files:
+                    shutil.move(rpm_file, fpath)
+
+                createrepo_args = ['createrepo', fpath]
+                subprocess.check_call(createrepo_args)
+
+        return (' '.join(kernel_build_argv), fpath)
 
     @staticmethod
     def append_and_log2stdout(lines, full_log):

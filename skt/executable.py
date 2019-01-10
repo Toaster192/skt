@@ -287,7 +287,8 @@ def cmd_build(cfg):
         extra_make_args=cfg.get('makeopts'),
         enable_debuginfo=cfg.get('enable_debuginfo'),
         rh_configs_glob=cfg.get('rh_configs_glob'),
-        localversion=cfg.get('localversion')
+        localversion=cfg.get('localversion'),
+        packaging=cfg.get('packaging')
     )
 
     # Clean the kernel source with 'make mrproper' if requested.
@@ -295,9 +296,8 @@ def cmd_build(cfg):
         builder.clean_kernel_source()
 
     try:
-        tgz = builder.mktgz()
-    except (CommandTimeoutError, subprocess.CalledProcessError, ParsingError,
-            IOError) as exc:
+        make_opts, file_path = builder.build()
+    except (subprocess.CalledProcessError, ParsingError, IOError) as exc:
         logging.error(exc)
         save_state(cfg, {'buildlog': builder.buildlog})
         retcode = SKT_FAIL
@@ -305,14 +305,22 @@ def cmd_build(cfg):
         (exc, exc_type, trace) = sys.exc_info()
         raise exc, exc_type, trace
 
-    if tgz:
-        if cfg.get('buildhead'):
-            ttgz = "%s.tar.gz" % cfg.get('buildhead')
-        else:
-            ttgz = addtstamp(tgz, tstamp)
-        shutil.move(tgz, ttgz)
-        logging.info("tarball path: %s", ttgz)
-        save_state(cfg, {'tarpkg': ttgz})
+    if file_path:
+        if 'tar.gz' in file_path:
+            # Rename the tarball to match the git commit that was built.
+            if cfg.get('buildhead'):
+                ttgz = "%s.tar.gz" % cfg.get('buildhead')
+            else:
+                ttgz = addtstamp(tgz, tstamp)
+            shutil.move(tgz, ttgz)
+
+            # Save the path to the tarball
+            logging.info("tarball path: %s", ttgz)
+            save_state(cfg, {'tarpkg': ttgz})
+
+        elif 'rpm' in file_path[0]:
+            # Save the path to the RPM repository.
+            save_state(cfg, {'rpm_path': file_path})
 
     tconfig = '%s.config' % cfg.get('buildhead')
     try:
@@ -326,9 +334,6 @@ def cmd_build(cfg):
 
     kernel_arch = builder.build_arch
     cross_compiler_prefix = builder.cross_compiler_prefix
-    make_opts = ' '.join(builder.make_argv_base
-                         + builder.targz_pkg_argv
-                         + builder.extra_make_args)
 
     save_state(cfg, {'kernel_arch': kernel_arch,
                      'cross_compiler_prefix': cross_compiler_prefix,
@@ -355,8 +360,12 @@ def cmd_publish(cfg):
         url = publisher.publish(cfg.get('tarpkg'))
         logging.info("published tarpkg url: %s", url)
         save_state(cfg, {'buildurl': url})
+    elif cfg.get('rpm_path'):
+        url = publisher.publish(cfg.get('rpm_path'))
+        logging.info("published RPM repo url: %s", url)
+        save_state(cfg, {'buildurl': url})
     else:
-        logging.debug('No kernel tarball to publish found!')
+        logging.debug('No build kernel was found for publishing!')
 
 
 @junit
@@ -653,6 +662,12 @@ def setup_parser():
         type=str,
         default="skt",
         help=("String to append to kernel version number (LOCALVERSION)")
+    )
+    parser_build.add_argument(
+        "--packaging",
+        type=str,
+        default="targz-pkg",
+        help=("Packaging argument for building the kernel")
     )
 
     # These arguments apply to the 'publish' skt command
