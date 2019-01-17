@@ -225,6 +225,36 @@ class KernelBuilder(object):
         )
         return kernel_build_argv
 
+    def find_tarball(self):
+        """
+        Find a tarball in the buildlog.
+
+        Returns:
+            The full path to the tarball (as a string), or None if the tarball
+            line was not found in the log.
+        """
+        # Compile a regex to look for the tarball filename.
+        tgz_regex = re.compile("^Tarball successfully created in (.*)$")
+
+        # Read the buildlog line by line looking for the tarball.
+        fpath = None
+        with open(self.buildlog, 'r') as fileh:
+            for log_line in fileh:
+                match = tgz_regex.search(log_line)
+
+                # If we find a match, store the path to the tarball and stop
+                # reading the buildlog.
+                if match:
+                    fpath = os.path.realpath(
+                        join_with_slash(
+                            self.source_dir,
+                            match.group(1)
+                        )
+                    )
+                    break
+
+        return fpath
+
     def mktgz(self, timeout=60 * 60 * 12):
         """
         Build kernel and modules, after that, pack everything into a tarball.
@@ -242,7 +272,6 @@ class KernelBuilder(object):
             IOError:             When tarball file doesn't exist.
         """
         fpath = None
-        stdout_list = []
 
         with io.open(self.buildlog, 'wb') as writer, \
                 io.open(self.buildlog, 'rb') as reader:
@@ -265,9 +294,9 @@ class KernelBuilder(object):
 
             # Watch for output and append it to the log and to stdout.
             while make.poll() is None:
-                self.append_and_log2stdout(reader.readlines(), stdout_list)
+                self.log2stdout(reader.readlines())
                 time.sleep(1)
-            self.append_and_log2stdout(reader.readlines(), stdout_list)
+            self.log2stdout(reader.readlines())
 
             # The timeout command exits with 124 if a timeout occurred.
             if make.returncode == 124:
@@ -284,33 +313,28 @@ class KernelBuilder(object):
                     ' '.join(kernel_build_argv)
                 )
 
-        match = re.search("^Tarball successfully created in (.*)$",
-                          ''.join(stdout_list), re.MULTILINE)
-        if match:
-            fpath = os.path.realpath(
-                join_with_slash(
-                    self.source_dir,
-                    match.group(1)
-                )
-            )
-        else:
+        # Search the build log for a tarball file.
+        fpath = self.find_tarball()
+
+        # Raise an exception if we did not find a tarball.
+        if not fpath:
             raise ParsingError('Failed to find tgz path in stdout')
 
+        # Does the tarball mentioned in the buidlog actually exist on the
+        # filesystem?
         if not os.path.isfile(fpath):
             raise IOError("Built kernel tarball {} not found".format(fpath))
 
         return fpath
 
     @staticmethod
-    def append_and_log2stdout(lines, full_log):
+    def log2stdout(lines):
         """
-        Append `lines` into `full_log` and show `lines` on stdout.
+        Show `lines` on stdout.
 
         Args:
             lines:      list of strings.
-            full_log:   list where `lines` members are appended.
         """
-        full_log.extend(lines)
         sys.stdout.write(''.join(lines))
         sys.stdout.flush()
 
